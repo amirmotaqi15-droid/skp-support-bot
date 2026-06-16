@@ -42,6 +42,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 STATE_FILE = "support_state.json"
 MEDIA_DIR = "media"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_ID")
+RESTART_LABEL = "شروع مجدد"
 
 # ====== تنظیمات دیتابیس PostgreSQL ======
 # این متغیر به صورت خودکار توسط Railway تنظیم می‌شود
@@ -111,7 +112,8 @@ MESSAGES = {
         "👨‍🎓 دانشجو: {student_name}\n"
         "📚 دوره: {course}\n"
         "سوال: {question}\n\n"
-        "لطفاً پاسخ خود را هم‌اکنون در این چت ارسال کنید."
+        "لطفاً پاسخ خود را هم‌اکنون در این چت ارسال کنید.\n"
+        "تمام پیام‌های شما تا زمان زدن دکمه ارسال پاسخ در صف می‌مانند."
     ),
     "teacher_private_error": "خطا: ربات نمی‌تواند به استاد پیام خصوصی ارسال کند.",
     "not_related_post": "❌ این سوال مربوط به دوره انتخاب‌شده نیست.",
@@ -797,8 +799,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_chat.type != ChatType.PRIVATE:
         await update.message.reply_text("لطفاً در چت خصوصی با من /start را ارسال کنید.")
         return ConversationHandler.END
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]])
+    buttons = [[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]
+    if is_admin(update.effective_user.id):
+        buttons.append([InlineKeyboardButton("پنل ادمین", callback_data="ap:open")])
+    keyboard = InlineKeyboardMarkup(buttons)
     await update.message.reply_text(MESSAGES["welcome"], reply_markup=keyboard)
+    # Send a persistent reply keyboard with a quick restart button so users can
+    # re-open the bot without typing /start
+    try:
+        restart_kb = ReplyKeyboardMarkup([[KeyboardButton(RESTART_LABEL)]], resize_keyboard=True, one_time_keyboard=False)
+        await context.bot.send_message(chat_id=update.effective_user.id, text="برای شروع سریع دکمه را بزنید:", reply_markup=restart_kb)
+    except Exception:
+        pass
     return STUDENT_PHONE
 
 
@@ -915,19 +927,19 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def _extract_message_data(message) -> dict | None:
     """استخراج داده پیام و تبدیل به دیکشنری برای ذخیره در صف"""
     if message.text:
-        return {"text": message.text.strip(), "media_file_id": None, "media_type": None}
+        return {"type": "text", "text": message.text.strip(), "media_file_id": None, "media_type": None}
     elif message.photo:
-        return {"text": message.caption or "", "media_file_id": message.photo[-1].file_id, "media_type": "photo"}
+        return {"type": "photo", "text": message.caption or "", "media_file_id": message.photo[-1].file_id, "media_type": "photo"}
     elif message.video:
-        return {"text": message.caption or "", "media_file_id": message.video.file_id, "media_type": "video"}
+        return {"type": "video", "text": message.caption or "", "media_file_id": message.video.file_id, "media_type": "video"}
     elif message.voice:
-        return {"text": message.caption or "", "media_file_id": message.voice.file_id, "media_type": "voice"}
+        return {"type": "voice", "text": message.caption or "", "media_file_id": message.voice.file_id, "media_type": "voice"}
     elif message.document:
-        return {"text": message.caption or "", "media_file_id": message.document.file_id, "media_type": "document"}
+        return {"type": "document", "text": message.caption or "", "media_file_id": message.document.file_id, "media_type": "document"}
     elif message.audio:
-        return {"text": message.caption or "", "media_file_id": message.audio.file_id, "media_type": "audio"}
+        return {"type": "audio", "text": message.caption or "", "media_file_id": message.audio.file_id, "media_type": "audio"}
     elif message.animation:
-        return {"text": message.caption or "", "media_file_id": message.animation.file_id, "media_type": "animation"}
+        return {"type": "animation", "text": message.caption or "", "media_file_id": message.animation.file_id, "media_type": "animation"}
     return None
 
 
@@ -1012,7 +1024,7 @@ async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT
         + f"📚 دوره: {course}\n"
         f"🕒 زمان: {now}\n"
         f"📦 تعداد پیام‌ها: {len(pending)}\n\n"
-        f"سوال: {combined_text}"
+        f"پیام‌های کاربر در ادامه ارسال می‌شوند."
     )
     keyboard = [
         [InlineKeyboardButton("✅ پاسخ می‌دهم", callback_data=f"answer:{question_id}")],
@@ -1027,28 +1039,31 @@ async def submit_question_callback(update: Update, context: ContextTypes.DEFAULT
         )
         question_data["group_message_id"] = msg.message_id
 
-        # ارسال همه پیام‌های رسانه‌ای صف به گروه
+        # ارسال همه پیام‌ها به گروه به ترتیب
         for i, pm in enumerate(pending, 1):
-            fid = pm.get("media_file_id")
-            mt = pm.get("media_type")
-            caption = pm.get("text") or f"پیام {i}"
-            if not fid:
-                continue
-            try:
-                if mt == "photo":
-                    await context.bot.send_photo(chat_id=group_chat_id, photo=fid, caption=f"📷 {caption}")
-                elif mt == "video":
-                    await context.bot.send_video(chat_id=group_chat_id, video=fid, caption=f"🎥 {caption}")
-                elif mt == "voice":
-                    await context.bot.send_voice(chat_id=group_chat_id, voice=fid, caption=f"🎙️ {caption}")
-                elif mt == "document":
-                    await context.bot.send_document(chat_id=group_chat_id, document=fid, caption=f"📎 {caption}")
-                elif mt == "audio":
-                    await context.bot.send_audio(chat_id=group_chat_id, audio=fid, caption=f"🎵 {caption}")
-                elif mt == "animation":
-                    await context.bot.send_animation(chat_id=group_chat_id, animation=fid, caption=f"🎬 {caption}")
-            except Exception as e:
-                logger.error("خطا ارسال رسانه %d به گروه: %s", i, e)
+            msg_text = pm.get("text") or ""
+            if pm.get("type") == "text":
+                try:
+                    await context.bot.send_message(chat_id=group_chat_id, text=f"📩 پیام {i}: {msg_text}" if msg_text else f"📩 پیام {i}")
+                except Exception as e:
+                    logger.error("خطا ارسال متن %d به گروه: %s", i, e)
+            else:
+                caption = msg_text or f"پیام {i}"
+                try:
+                    if pm.get("type") == "photo":
+                        await context.bot.send_photo(chat_id=group_chat_id, photo=pm.get("media_file_id"), caption=f"📷 {caption}")
+                    elif pm.get("type") == "video":
+                        await context.bot.send_video(chat_id=group_chat_id, video=pm.get("media_file_id"), caption=f"🎥 {caption}")
+                    elif pm.get("type") == "voice":
+                        await context.bot.send_voice(chat_id=group_chat_id, voice=pm.get("media_file_id"), caption=f"🎙️ {caption}")
+                    elif pm.get("type") == "document":
+                        await context.bot.send_document(chat_id=group_chat_id, document=pm.get("media_file_id"), caption=f"📎 {caption}")
+                    elif pm.get("type") == "audio":
+                        await context.bot.send_audio(chat_id=group_chat_id, audio=pm.get("media_file_id"), caption=f"🎵 {caption}")
+                    elif pm.get("type") == "animation":
+                        await context.bot.send_animation(chat_id=group_chat_id, animation=pm.get("media_file_id"), caption=f"🎬 {caption}")
+                except Exception as e:
+                    logger.error("خطا ارسال رسانه %d به گروه: %s", i, e)
 
         db_save_question(question_id, question_data)
 
@@ -1148,85 +1163,98 @@ async def group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     teacher_id = update.effective_user.id
-    pending = db_get_teacher_pending(teacher_id)
-    if not pending:
+    pending_question = db_get_teacher_pending(teacher_id)
+    if not pending_question:
         await update.message.reply_text(MESSAGES["no_pending_question"])
         return
 
-    answer_text = answer_media_file_id = answer_media_type = None
-    if update.message.text:
-        answer_text = update.message.text.strip()
-    elif update.message.photo:
-        answer_text = update.message.caption or "📷 عکس پاسخ"
-        answer_media_file_id = update.message.photo[-1].file_id
-        answer_media_type = "photo"
-    elif update.message.video:
-        answer_text = update.message.caption or "🎥 ویدیو پاسخ"
-        answer_media_file_id = update.message.video.file_id
-        answer_media_type = "video"
-    elif update.message.voice:
-        answer_text = update.message.caption or "🎙️ ویس پاسخ"
-        answer_media_file_id = update.message.voice.file_id
-        answer_media_type = "voice"
-    elif update.message.audio:
-        answer_text = update.message.caption or "🎵 آهنگ پاسخ"
-        answer_media_file_id = update.message.audio.file_id
-        answer_media_type = "audio"
-    elif update.message.document:
-        answer_text = update.message.caption or "📎 فایل پاسخ"
-        answer_media_file_id = update.message.document.file_id
-        answer_media_type = "document"
-    elif update.message.animation:
-        answer_text = update.message.caption or "🎬 GIF پاسخ"
-        answer_media_file_id = update.message.animation.file_id
-        answer_media_type = "animation"
-    else:
+    msg_data = _extract_message_data(update.message)
+    if not msg_data:
         await update.message.reply_text("لطفاً متن یا رسانه‌ای برای پاسخ ارسال کنید.")
         return
 
-    question = db_get_question(pending)
-    if not question:
-        await update.message.reply_text(MESSAGES["question_not_found"])
+    teacher_pending = context.user_data.setdefault("teacher_pending_messages", [])
+    teacher_pending.append(msg_data)
+    context.user_data["teacher_pending_question"] = pending_question
+
+    count = len(teacher_pending)
+    await update.message.reply_text(
+        f"✅ پیام شما در صف قرار گرفت.\n"
+        f"تعداد پیام‌های پاسخ: {count}.\n"
+        "وقتی آماده بودید دکمه ارسال پاسخ را بزنید.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 ارسال پاسخ", callback_data="submit_answer")],
+            [InlineKeyboardButton("🗑 پاک کردن پاسخ‌ها", callback_data="clear_answer")],
+        ]),
+    )
+    return
+async def submit_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    teacher_id = query.from_user.id
+    pending_question = context.user_data.get("teacher_pending_question") or db_get_teacher_pending(teacher_id)
+    teacher_pending = context.user_data.get("teacher_pending_messages", [])
+
+    if not pending_question or not teacher_pending:
+        await query.edit_message_text("⚠️ هیچ پاسخی در صف نیست یا سوالی برای پاسخ دادن ندارید.")
         return
 
-    db_update_question_status(
-        pending, "answered",
-        answer=answer_text,
+    question = db_get_question(pending_question)
+    if not question:
+        await query.edit_message_text("⚠️ سوال یافت نشد.")
+        return
+
+    text_parts = [m["text"] for m in teacher_pending if m.get("text")]
+    combined_text = "\n".join(text_parts).strip() or "(بدون متن)"
+    answer_media = next((m for m in teacher_pending if m.get("media_file_id")), None)
+    answer_media_file_id = answer_media["media_file_id"] if answer_media else None
+    answer_media_type = answer_media["media_type"] if answer_media else None
+
+    if not db_update_question_status(
+        pending_question, "answered",
+        answer=combined_text,
         answer_media_file_id=answer_media_file_id,
         answer_media_type=answer_media_type
-    )
-    db_remove_teacher_pending(teacher_id)
+    ):
+        await query.edit_message_text("❌ خطا در ثبت پاسخ. لطفاً دوباره تلاش کنید.")
+        return
 
-    student_msg = (
-        f"✅ پاسخ استاد:\n📚 دوره: {question['course']}\n"
-        f"👨‍🏫 استاد: {question['assigned_teacher_name']}\n\nپاسخ: {answer_text}"
-    )
+    db_remove_teacher_pending(teacher_id)
+    context.user_data.pop("teacher_pending_messages", None)
+    context.user_data.pop("teacher_pending_question", None)
+
+    student_id = question["student_id"]
     try:
         await context.bot.send_message(
-            chat_id=question["student_id"], text=student_msg,
+            chat_id=student_id,
+            text=(
+                f"✅ پاسخ استاد:\n📚 دوره: {question['course']}\n"
+                f"👨‍🏫 استاد: {question['assigned_teacher_name']}\n\n"
+                f"{combined_text}"
+            ),
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("سوالی ندارم", callback_data=f"no_more:{pending}")],
-                [InlineKeyboardButton("باز سوال دارم", callback_data=f"ask_more:{pending}")],
+                [InlineKeyboardButton("سوالی ندارم", callback_data=f"no_more:{pending_question}")],
+                [InlineKeyboardButton("باز سوال دارم", callback_data=f"ask_more:{pending_question}")],
             ])
         )
         if answer_media_file_id and answer_media_type:
-            mt, fid, sid = answer_media_type, answer_media_file_id, question["student_id"]
-            if mt == "photo":
-                await context.bot.send_photo(chat_id=sid, photo=fid, caption="📷 عکس پاسخ")
-            elif mt == "video":
-                await context.bot.send_video(chat_id=sid, video=fid, caption="🎥 ویدیو پاسخ")
-            elif mt == "voice":
-                await context.bot.send_voice(chat_id=sid, voice=fid, caption="🎙️ ویس پاسخ")
-            elif mt == "audio":
-                await context.bot.send_audio(chat_id=sid, audio=fid, caption="🎵 آهنگ پاسخ")
-            elif mt == "document":
-                await context.bot.send_document(chat_id=sid, document=fid, caption="📎 فایل پاسخ")
-            elif mt == "animation":
-                await context.bot.send_animation(chat_id=sid, animation=fid, caption="🎬 GIF پاسخ")
-        await update.message.reply_text(MESSAGES["answer_sent"])
+            if answer_media_type == "photo":
+                await context.bot.send_photo(chat_id=student_id, photo=answer_media_file_id, caption="📷 عکس پاسخ")
+            elif answer_media_type == "video":
+                await context.bot.send_video(chat_id=student_id, video=answer_media_file_id, caption="🎥 ویدیو پاسخ")
+            elif answer_media_type == "voice":
+                await context.bot.send_voice(chat_id=student_id, voice=answer_media_file_id, caption="🎙️ وِیس پاسخ")
+            elif answer_media_type == "audio":
+                await context.bot.send_audio(chat_id=student_id, audio=answer_media_file_id, caption="🎵 آهنگ پاسخ")
+            elif answer_media_type == "document":
+                await context.bot.send_document(chat_id=student_id, document=answer_media_file_id, caption="📎 فایل پاسخ")
+            elif answer_media_type == "animation":
+                await context.bot.send_animation(chat_id=student_id, animation=answer_media_file_id, caption="🎬 GIF پاسخ")
+        await query.edit_message_text(MESSAGES["answer_sent"])
     except Exception as e:
         logger.error("خطا ارسال پاسخ: %s", e)
-        await update.message.reply_text(MESSAGES["answer_send_failed"])
+        await query.edit_message_text(MESSAGES["answer_send_failed"])
+        return
 
     group_chat_id = db_get_group_chat_id()
     if group_chat_id and question.get("group_message_id"):
@@ -1240,6 +1268,17 @@ async def teacher_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
         except Exception as e:
             logger.warning("خطا update گروه: %s", e)
+
+
+async def clear_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("teacher_pending_messages", None)
+    context.user_data.pop("teacher_pending_question", None)
+    await query.edit_message_text(
+        "🗑️ صف پاسخ‌ها پاک شد.\n"
+        "اگر می‌خواهید دوباره پاسخ ارسال کنید، پیام‌های جدید را ارسال کنید."
+    )
 
 
 async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1286,11 +1325,17 @@ async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def restart_bot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    buttons = [[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]
+    if is_admin(query.from_user.id):
+        buttons.append([InlineKeyboardButton("پنل ادمین", callback_data="ap:open")])
     try:
         await query.message.reply_text(
             MESSAGES["welcome"],
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]),
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
+        # also send the persistent restart reply keyboard
+        restart_kb = ReplyKeyboardMarkup([[KeyboardButton(RESTART_LABEL)]], resize_keyboard=True, one_time_keyboard=False)
+        await context.bot.send_message(chat_id=query.from_user.id, text="برای شروع سریع دکمه را بزنید:", reply_markup=restart_kb)
     except Exception:
         pass
 
@@ -1336,6 +1381,25 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["admin_mode"] = True
 
     await update.message.reply_text(
+        "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+        parse_mode="Markdown",
+        reply_markup=_admin_main_keyboard(),
+    )
+    return ADMIN_MENU
+
+
+async def admin_panel_callback_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """ورودی پنل ادمین از طریق callback button"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ دسترسی ندارید.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    context.user_data["admin_mode"] = True
+
+    await query.edit_message_text(
         "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
         parse_mode="Markdown",
         reply_markup=_admin_main_keyboard(),
@@ -1390,6 +1454,18 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop("new_intern", None)
         await query.edit_message_text(
             "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+            parse_mode="Markdown",
+            reply_markup=_admin_main_keyboard(),
+        )
+        return ADMIN_MENU
+
+    # ---- باز کردن پنل از دکمه شروع ----
+    if data == "ap:open":
+        context.user_data.clear()
+        context.user_data["admin_mode"] = True
+        await query.edit_message_text(
+            "🛠 *پنل مدیریت ادمین*\n\n"
+            "یک گزینه را انتخاب کنید:",
             parse_mode="Markdown",
             reply_markup=_admin_main_keyboard(),
         )
@@ -1833,7 +1909,10 @@ def main() -> None:
 
     # ====== پنل ادمین گرافیکی (مرحله به مرحله) ======
     admin_panel_conv = ConversationHandler(
-        entry_points=[CommandHandler("panel", admin_panel)],
+        entry_points=[
+            CommandHandler("panel", admin_panel),
+            CallbackQueryHandler(admin_panel_callback_entry, pattern=r"^ap:open$"),
+        ],
         states={
             ADMIN_MENU: [
                 CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:"),
@@ -1884,6 +1963,8 @@ def main() -> None:
         per_chat=True,
     )
     app.add_handler(admin_panel_conv)
+    # Allow pressing a persistent 'شروع مجدد' reply-button to trigger /start without typing
+    app.add_handler(MessageHandler(filters.Regex(r"^" + RESTART_LABEL + r"$"), start))
 
     conv_handler = ConversationHandler(
         entry_points=[
@@ -1912,6 +1993,8 @@ def main() -> None:
     )
 
     app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(submit_answer_callback, pattern=r"^submit_answer$"))
+    app.add_handler(CallbackQueryHandler(clear_answer_callback, pattern=r"^clear_answer$"))
     app.add_handler(CallbackQueryHandler(post_answer_callback, pattern=r"^(no_more|ask_more):"))
     app.add_handler(CallbackQueryHandler(restart_bot_callback, pattern=r"^restart_bot$"))
     app.add_handler(CommandHandler("setgroup", set_group))
