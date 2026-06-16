@@ -797,7 +797,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_chat.type != ChatType.PRIVATE:
         await update.message.reply_text("لطفاً در چت خصوصی با من /start را ارسال کنید.")
         return ConversationHandler.END
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]])
+    buttons = [[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]
+    if is_admin(update.effective_user.id):
+        buttons.append([InlineKeyboardButton("پنل ادمین", callback_data="ap:open")])
+    keyboard = InlineKeyboardMarkup(buttons)
     await update.message.reply_text(MESSAGES["welcome"], reply_markup=keyboard)
     return STUDENT_PHONE
 
@@ -1286,10 +1289,13 @@ async def post_answer_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def restart_bot_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    buttons = [[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]
+    if is_admin(query.from_user.id):
+        buttons.append([InlineKeyboardButton("پنل ادمین", callback_data="ap:open")])
     try:
         await query.message.reply_text(
             MESSAGES["welcome"],
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("شروع ثبت درخواست", callback_data="start_register")]]),
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
     except Exception:
         pass
@@ -1336,6 +1342,25 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["admin_mode"] = True
 
     await update.message.reply_text(
+        "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+        parse_mode="Markdown",
+        reply_markup=_admin_main_keyboard(),
+    )
+    return ADMIN_MENU
+
+
+async def admin_panel_callback_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """ورودی پنل ادمین از طریق callback button"""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id):
+        await query.edit_message_text("⛔️ دسترسی ندارید.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    context.user_data["admin_mode"] = True
+
+    await query.edit_message_text(
         "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
         parse_mode="Markdown",
         reply_markup=_admin_main_keyboard(),
@@ -1390,6 +1415,18 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop("new_intern", None)
         await query.edit_message_text(
             "🛠 *پنل مدیریت ادمین*\n\nیک گزینه را انتخاب کنید:",
+            parse_mode="Markdown",
+            reply_markup=_admin_main_keyboard(),
+        )
+        return ADMIN_MENU
+
+    # ---- باز کردن پنل از دکمه شروع ----
+    if data == "ap:open":
+        context.user_data.clear()
+        context.user_data["admin_mode"] = True
+        await query.edit_message_text(
+            "🛠 *پنل مدیریت ادمین*\n\n"
+            "یک گزینه را انتخاب کنید:",
             parse_mode="Markdown",
             reply_markup=_admin_main_keyboard(),
         )
@@ -1833,7 +1870,10 @@ def main() -> None:
 
     # ====== پنل ادمین گرافیکی (مرحله به مرحله) ======
     admin_panel_conv = ConversationHandler(
-        entry_points=[CommandHandler("panel", admin_panel)],
+        entry_points=[
+            CommandHandler("panel", admin_panel),
+            CallbackQueryHandler(admin_panel_callback_entry, pattern=r"^ap:open$"),
+        ],
         states={
             ADMIN_MENU: [
                 CallbackQueryHandler(admin_panel_callback, pattern=r"^ap:"),
